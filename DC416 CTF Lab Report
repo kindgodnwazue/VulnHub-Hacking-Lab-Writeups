@@ -1,0 +1,471 @@
+DC416: Baffle — Write-up Summary
+
+This lab follows a classic CTF progression: reconnaissance → exposed Git repository → source-code analysis → binary exploitation → credential discovery → local service exploitation → flag hunting.
+
+Lab environment only: The techniques below should only be practiced against intentionally vulnerable machines such as this VulnHub CTF.
+
+1. Reconnaissance
+
+Because the target received its IP address through DHCP, the first step was identifying it on the local network.
+
+A network scan identified the target:
+
+nmap -sS -O 192.168.159.0/24
+
+The target was discovered at:
+
+192.168.159.133
+
+A full enumeration scan was then performed:
+
+nmap -A -T4 -p- 192.168.159.133
+Open services
+Port	Service	Details
+22	SSH	OpenSSH 6.7p1
+80	HTTP	nginx 1.6.2
+6969	Unknown/custom service	Later identified as a custom binary service
+
+The most important discovery from the Nmap scan was:
+
+http-git:
+192.168.159.133:80/.git/
+Git repository found!
+
+This immediately suggested that the web server had an exposed .git directory.
+
+2. Checking the Web Application
+
+Opening the web server revealed the challenge instructions.
+
+Engagement Rules
+No username/password bruteforcing is necessary
+This box has 5 flags
+Flags are in FLAG{} format
+The goal is not to get root
+Get the flags and move on
+
+The challenge therefore clearly focused on finding all five flags rather than privilege escalation to root.
+
+3. Downloading the Exposed Git Repository
+
+The Nmap scan revealed that .git was accessible.
+
+Attempting to clone it directly failed:
+
+git clone http://192.168.159.133/.git
+
+So the repository files were recursively downloaded instead:
+
+wget -r http://192.168.159.133/.git/
+
+The downloaded directory contained the internal Git structure:
+
+branches
+config
+description
+HEAD
+hooks
+index
+info
+logs
+objects
+refs
+
+This was important because Git history can contain files and information that have been deleted from the current version of a project.
+
+4. Investigating the Git History
+
+The commit history was examined:
+
+git log
+
+Several interesting commits appeared:
+
+Trashed my code, but deployed the product anyway.
+Some assembly required
+Made it into a write-type-thing instead
+My cat danced on the keyboard
+This coder turned coffee into code.
+Hello, friend...
+
+The full changes were investigated using:
+
+git log -p
+
+The repository was then cloned locally:
+
+git clone .git baffle_git
+
+Inside the reconstructed project was:
+
+hellofriend.c
+FLAG 1 — Hidden in Source Code
+
+One particularly suspicious commit was:
+
+My cat danced on the keyboard
+
+Checking out that commit revealed unusual capitalization throughout the source code.
+
+The uppercase characters were extracted with:
+
+grep -Eo "[A-Z]" hellofriend.c
+
+The output was:
+
+FILEFLAGARSEREQUEST
+
+Extracting the meaningful portion revealed:
+
+FLAG{ARSE_REQUEST}
+🏁 Flag 1
+FLAG{ARSE_REQUEST}
+Lesson
+
+Source code can contain hidden information through:
+
+unusual capitalization
+comments
+variable names
+whitespace
+deleted Git commits
+old versions of files
+
+Always inspect the complete history of an exposed repository.
+
+5. Discovering an Encoded Binary
+
+Another Git commit contained a file called:
+
+project.enc
+
+Checking out the relevant commit:
+
+git checkout d38ce2e28e32aa7787d5e8a2cb83d3f75c988eca
+
+The directory contained:
+
+hellofriend.c
+project.enc
+
+The encoded file appeared to be Base64.
+
+It was decoded:
+
+cat project.enc | base64 -d > project
+
+Checking the resulting file showed:
+
+ELF 64-bit LSB executable
+
+The file was therefore a Linux executable.
+
+6. Reverse Engineering the Binary
+
+The binary was examined with GDB.
+
+Security protections were checked:
+
+CANARY    : disabled
+FORTIFY   : disabled
+NX        : disabled
+PIE       : disabled
+RELRO     : disabled
+
+This binary had essentially no modern exploitation protections enabled.
+
+Disassembling main revealed that it called:
+
+parse_request
+
+The parse_request function contained two major code paths.
+
+One path processed requests beginning with a particular control byte and appeared capable of reading a user-specified file.
+
+This allowed the researcher to understand the binary's custom protocol.
+
+Testing locally confirmed the file-reading functionality.
+
+7. Connecting the Binary to Port 6969
+
+Earlier reconnaissance had identified an unknown service on:
+
+TCP 6969
+
+The researcher suspected that the service running on this port was the same project binary recovered from the Git history.
+
+Testing the custom protocol against the service confirmed the suspicion.
+
+The service responded to a crafted request by returning file contents.
+
+This demonstrated that port 6969 exposed functionality from the vulnerable binary.
+
+FLAG 2 — Exploiting the Custom Service
+
+Further analysis revealed a memory-safety issue involving unsafe copying of attacker-controlled data.
+
+The original write-up used binary exploitation techniques to obtain a shell running as:
+
+uid=1001(alice)
+
+After gaining access, the filesystem was searched.
+
+A flag was discovered at the system's top level:
+
+FLAG{is_there_an_ivana_tinkle}
+🏁 Flag 2
+FLAG{is_there_an_ivana_tinkle}
+Lesson
+
+The important takeaway is that the service combined several dangerous properties:
+
+custom network protocol
+unsafe memory handling
+predictable binary memory layout
+missing modern exploit mitigations
+
+This is exactly why exposing custom services without proper security review is risky.
+
+8. Exploring Alice's Environment
+
+After gaining access as Alice, the filesystem was explored.
+
+A particularly interesting directory was:
+
+/home/bob/filez
+
+It contained:
+
+auth.txt
+flag.txt
+flag_vault
+
+The permissions showed that the executable had special permissions.
+
+Running:
+
+./flag_vault
+
+produced an authentication prompt.
+
+The program required an authentication code before revealing protected data.
+
+9. Discovering an Email
+
+The local mail system was checked.
+
+Alice had received an email from Bob.
+
+The message stated that Bob's password was stored in a file and that authentication was required to access the contents of the Flag Vault.
+
+This provided important information about the next stage of the challenge.
+
+FLAG 3 — Flag Vault Logic Issue
+
+The challenge involved understanding how the flag_vault program located its supporting files.
+
+By manipulating the local file environment, the researcher was able to control which files the program accessed.
+
+This allowed the authentication check to be bypassed in the intended CTF environment.
+
+The program revealed:
+
+FLAG{tr3each3ry_anD_cUnn1ng}
+🏁 Flag 3
+FLAG{tr3each3ry_anD_cUnn1ng}
+Lesson
+
+Programs that rely on:
+
+predictable relative paths
+symbolic links
+insecure file ownership assumptions
+externally controlled working directories
+
+can accidentally introduce security problems.
+
+10. SSH Access as Bob
+
+The recovered information was then used to authenticate to the SSH service as Bob.
+
+After successfully logging in, another interesting directory was discovered:
+
+/home/bob/binz/
+
+Inside was:
+
+ctfingerd
+
+Running the program locally produced:
+
+bind: Address already in use
+
+This indicated that another instance was already running.
+
+Checking listening services revealed:
+
+127.0.0.1:7979
+
+Port 7979 was only listening locally.
+
+11. Investigating the Local Finger Service
+
+Connecting to the local service produced a prompt:
+
+User to query:
+
+Different usernames produced different responses.
+
+For example:
+
+bob
+
+returned:
+
+Vulnerable by Design
+
+While another user produced:
+
+I haz a flag mwahahaha
+
+The service appeared to retrieve information from users' .plan files.
+
+This gave a clear indication of how the service worked.
+
+12. Reverse Engineering ctfingerd
+
+The executable was copied to the attack machine and analyzed.
+
+Security protections showed:
+
+CANARY    : ENABLED
+NX        : ENABLED
+PIE       : disabled
+RELRO     : disabled
+
+Unlike the previous binary, this one had stronger protections.
+
+Most notably:
+
+Stack Canary enabled
+NX enabled
+
+This meant a simple stack overflow would not be sufficient.
+
+13. Identifying the Overflow Boundary
+
+The service's input handling was tested to determine where the buffer overflow occurred.
+
+Different input sizes were used.
+
+At a certain point, the program continued normally.
+
+Increasing the input by one byte caused:
+
+*** stack smashing detected ***
+
+This indicated that the input had reached and corrupted the stack canary.
+
+The exact offset therefore became important.
+
+14. Defeating the Canary in the CTF
+
+The service's behavior allowed the researcher to distinguish between:
+
+a correct canary prefix
+an incorrect canary prefix
+
+This effectively created an information oracle.
+
+The original solution used repeated local challenge interactions to recover the canary byte by byte.
+
+Once the stack canary was known, the exploit could continue past the stack protection mechanism.
+
+15. Obtaining the Fourth Flag
+
+The exploit eventually resulted in a shell running as:
+
+vulnhub
+
+The user's home directory initially contained a misleading message:
+
+Sorry Mario. The flag is in another castle.
+
+However, further exploration revealed a directory:
+
+.my_loot
+
+Inside was the actual flag.
+
+FLAG{i_tot_i_saw_a_puddy_tat}
+🏁 Flag 4
+FLAG{i_tot_i_saw_a_puddy_tat}
+Lesson
+
+CTF challenges often include decoy flags or misleading messages.
+
+Don't stop after finding the first interesting file. Continue enumerating the environment systematically.
+
+16. Finding the Final Flag
+
+The final stage was much simpler.
+
+With the additional access obtained from the previous exploitation stage, the researcher traversed the user directories.
+
+Inside Charlie's home directory was:
+
+/home/charlie/flag.txt
+
+Reading it revealed:
+
+FLAG{i_haz_sriracha_ice_cream}
+🏁 Flag 5
+FLAG{i_haz_sriracha_ice_cream}
+Complete Flag Summary
+Flag	Value	Method
+Flag 1	FLAG{ARSE_REQUEST}	Hidden capitalization in Git commit
+Flag 2	FLAG{is_there_an_ivana_tinkle}	Vulnerable custom service
+Flag 3	FLAG{tr3each3ry_anD_cUnn1ng}	File/path handling weakness
+Flag 4	FLAG{i_tot_i_saw_a_puddy_tat}	Exploitation of local CTF service
+Flag 5	FLAG{i_haz_sriracha_ice_cream}	Filesystem enumeration
+Overall Attack Chain
+
+The full progression can be summarized as:
+
+Network Discovery
+        ↓
+Port and Service Enumeration
+        ↓
+Exposed .git Directory
+        ↓
+Recover Git Repository
+        ↓
+Analyze Historical Commits
+        ↓
+Discover Hidden Flag
+        ↓
+Recover Encoded Binary
+        ↓
+Reverse Engineer Custom Protocol
+        ↓
+Access Custom Network Service
+        ↓
+Obtain Initial User Access
+        ↓
+Enumerate Local Files and Mail
+        ↓
+Exploit Flag Vault Logic
+        ↓
+Obtain Bob's SSH Access
+        ↓
+Discover Local Service on 7979
+        ↓
+Reverse Engineer Service
+        ↓
+Analyze Memory Protections
+        ↓
+Exploit the CTF Service
+        ↓
+Obtain Additional User Access
+        ↓
+Find Remaining Flags
