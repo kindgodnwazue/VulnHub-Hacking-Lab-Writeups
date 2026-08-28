@@ -1,0 +1,208 @@
+DC-1 — Penetration Testing Lab Report
+
+Scope: VulnHub DC-1 intentionally vulnerable lab conducted in an authorized local environment.
+
+Reconnaissance
+
+I started by identifying the target machine on my local network using netdiscover.
+
+┌──(kindgod㉿kali)-[~/vulnhub/dc-1]
+└─$ sudo netdiscover -r 192.168.1.0/24
+
+The scan identified:
+
+192.168.1.106   08:00:27:ab:cd:ef
+
+The MAC prefix 08:00:27 indicated that the host was running as a VirtualBox virtual machine, matching the expected lab environment.
+
+Target identified: 192.168.1.106
+
+Port and Service Enumeration
+
+Next, I performed a full TCP port scan with service and version detection.
+
+sudo nmap -sS -sV -p- 192.168.1.106
+
+Results:
+
+PORT      STATE SERVICE     VERSION
+22/tcp    open  ssh         OpenSSH 6.0p1 Debian
+80/tcp    open  http        Apache httpd 2.2.22
+111/tcp   open  rpcbind
+
+Three services were exposed:
+
+SSH (22) — Remote administration service.
+HTTP (80) — Web server and the most promising initial attack surface.
+RPC (111) — Remote Procedure Call service.
+
+The web server became the primary focus for further enumeration.
+
+Enumeration
+Web Server Analysis
+
+I began by scanning the web server with Nikto.
+
+nikto -h http://192.168.1.106
+
+The scan revealed:
+
++ Server: Apache/2.2.22 (Debian)
++ /index.php: Drupal 7.2.3 detected
++ /CHANGELOG.txt: Drupal 7.x detected
++ /robots.txt: Contains 1 entry
+
+The most important finding was the CMS:
+
+Drupal 7.2.3
+
+This was a significantly outdated version of Drupal, making it a potential entry point.
+
+To confirm the CMS and gather additional information, I used Droopescan.
+
+droopescan scan drupal -u http://192.168.1.106
+
+Results:
+
+[+] Drupal version: 7.2.3
+[+] Possible interesting urls:
+    /CHANGELOG.txt
+    /INSTALL.txt
+    /README.txt
+
+The version was confirmed.
+
+Vulnerability Research
+
+I searched for publicly known vulnerabilities affecting the identified Drupal version.
+
+searchsploit drupal 7.2
+
+The results included known Drupal remote code execution vulnerabilities.
+
+The important finding was:
+
+Drupalgeddon2 — CVE-2018-7600
+
+This vulnerability affected vulnerable Drupal 7 installations and could allow unauthenticated remote code execution.
+
+Because the lab environment was intentionally vulnerable and authorized for exploitation, I used the appropriate Metasploit module to validate the vulnerability.
+
+Initial Access
+
+I used the Drupalgeddon2 module in Metasploit against the authorized lab target.
+
+The exploitation was successful, resulting in a Meterpreter session.
+
+[*] Meterpreter session 1 opened
+
+I then dropped into a system shell.
+
+meterpreter > shell
+
+Checking the current user showed:
+
+whoami
+www-data
+
+Initial access had been achieved through the web service.
+
+However, the www-data account had limited privileges.
+
+I therefore moved to the privilege-escalation phase.
+
+Privilege Escalation
+SUID Enumeration
+
+I searched the system for binaries with the SUID permission set.
+
+find / -perm -u=s -type f 2>/dev/null
+
+The results included several binaries, including:
+
+/usr/bin/find
+/usr/bin/passwd
+/usr/bin/sudo
+/usr/sbin/exim4
+/bin/su
+
+The most interesting finding was:
+
+/usr/bin/find
+
+The find binary had the SUID bit set.
+
+A SUID binary executes with the permissions of its owner rather than the permissions of the user running it. Since this binary was owned by root, this represented a potential privilege-escalation path within the intentionally vulnerable lab.
+
+I validated the misconfiguration and obtained elevated privileges.
+
+Verification:
+
+whoami
+root
+
+Additional verification:
+
+id
+uid=33(www-data) gid=33(www-data) euid=0(root)
+
+Although the original user context was www-data, the effective user ID was now root.
+
+Root-level access was successfully achieved.
+
+Flag
+
+With root privileges obtained, I navigated to the root user's directory.
+
+cd /root
+ls
+
+The flag was present:
+
+flag.txt
+
+Reading the flag confirmed successful completion of the lab.
+
+cat flag.txt
+Congrats! You've rooted DC-1!
+Attack Chain Summary
+
+The complete path to compromising the authorized DC-1 lab was:
+
+Network Discovery
+        ↓
+Target Identification
+        ↓
+Nmap Port Scanning
+        ↓
+Web Service Enumeration
+        ↓
+Drupal CMS Identification
+        ↓
+Drupal Version Detection
+        ↓
+Vulnerability Research
+        ↓
+Remote Code Execution
+        ↓
+Initial Access as www-data
+        ↓
+Local Enumeration
+        ↓
+SUID Misconfiguration Discovery
+        ↓
+Privilege Escalation
+        ↓
+ROOT ACCESS
+Key Findings
+Initial Access
+
+Affected component: Outdated Drupal installation
+Impact: Remote code execution in the vulnerable lab environment
+Result: Initial shell as the low-privileged www-data user.
+
+Privilege Escalation
+
+Affected component: Misconfigured SUID permissions on the find binary
+Impact: Local privilege escalation
+Result: Root-level access to the system.
